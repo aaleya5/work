@@ -1,0 +1,214 @@
+// EduTrack Prisma schema
+// Run `npx prisma generate` after any change.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  STUDENT
+  INSTRUCTOR
+  ADMIN
+}
+
+enum CourseCategory {
+  PROGRAMMING
+  DESIGN
+  DATA_SCIENCE
+  BUSINESS
+  OTHER
+}
+
+enum DifficultyLevel {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+enum AttemptStatus {
+  PASSED
+  FAILED
+}
+
+// ---------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  name      String
+  role      Role     @default(STUDENT)
+  createdAt DateTime @default(now())
+
+  coursesTaught Course[]         @relation("InstructorCourses")
+  enrollments   Enrollment[]
+  lessonProgress LessonProgress[]
+  quizAttempts  QuizAttempt[]
+
+  @@map("users")
+}
+
+model Course {
+  id           String          @id @default(cuid())
+  title        String
+  slug         String          @unique
+  category     CourseCategory
+  difficulty   DifficultyLevel
+  price        Decimal         @db.Decimal(8, 2)
+  published    Boolean         @default(false)
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  instructorId String
+  instructor   User            @relation("InstructorCourses", fields: [instructorId], references: [id])
+
+  modules     CourseModule[]
+  enrollments Enrollment[]
+  quizzes     Quiz[]
+
+  @@index([category, difficulty])
+  @@index([instructorId])
+  @@map("courses")
+}
+
+model CourseModule {
+  id          String @id @default(cuid())
+  title       String
+  // Auto-incrementing per-row order value. Postgres gives each
+  // @default(autoincrement()) column its own sequence, so ordering works
+  // without manually tracking/incrementing an index in application code.
+  moduleOrder Int    @default(autoincrement())
+
+  courseId String
+  course   Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  lessons Lesson[]
+  quizzes Quiz[]
+
+  @@index([courseId])
+  @@map("course_modules")
+}
+
+model Lesson {
+  id          String  @id @default(cuid())
+  title       String
+  content     String
+  videoUrl    String?
+  // Same auto-increment-for-ordering pattern as CourseModule.moduleOrder.
+  lessonOrder Int     @default(autoincrement())
+
+  moduleId String
+  module   CourseModule @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+
+  progress LessonProgress[]
+
+  @@index([moduleId])
+  @@map("lessons")
+}
+
+model Enrollment {
+  id              String   @id @default(cuid())
+  enrolledAt      DateTime @default(now())
+  // Generated once via crypto.randomUUID() when completion criteria are met.
+  // Never regenerated once set.
+  certificateCode String?
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  courseId String
+  course   Course @relation(fields: [courseId], references: [id])
+
+  @@unique([userId, courseId])
+  @@index([courseId])
+  @@map("enrollments")
+}
+
+model LessonProgress {
+  id          String   @id @default(cuid())
+  completedAt DateTime @default(now())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  lessonId String
+  lesson   Lesson @relation(fields: [lessonId], references: [id])
+
+  @@unique([userId, lessonId])
+  @@index([lessonId])
+  @@map("lesson_progress")
+}
+
+model Quiz {
+  id          String @id @default(cuid())
+  title       String
+  maxAttempts Int    @default(3)
+  // Minimum percentage (0-100) required to pass.
+  passScore   Int    @default(70)
+
+  courseId String
+  course   Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  moduleId String?
+  module   CourseModule? @relation(fields: [moduleId], references: [id])
+
+  questions Question[]
+  attempts  QuizAttempt[]
+
+  @@index([courseId])
+  @@map("quizzes")
+}
+
+model Question {
+  id     String @id @default(cuid())
+  text   String
+
+  quizId String
+  quiz   Quiz   @relation(fields: [quizId], references: [id], onDelete: Cascade)
+
+  options Option[]
+
+  @@index([quizId])
+  @@map("questions")
+}
+
+model Option {
+  id        String  @id @default(cuid())
+  text      String
+  isCorrect Boolean @default(false)
+
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@index([questionId])
+  @@map("options")
+}
+
+model QuizAttempt {
+  id           String        @id @default(cuid())
+  score        Float
+  status       AttemptStatus
+  correctCount Int
+  totalCount   Int
+  createdAt    DateTime      @default(now())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  quizId String
+  quiz   Quiz   @relation(fields: [quizId], references: [id])
+
+  @@index([userId, quizId])
+  @@map("quiz_attempts")
+}
