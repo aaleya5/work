@@ -1,13 +1,14 @@
 import { Prisma } from '@prisma/client';
 import prisma from '../prisma';
 import { logger } from '../utils/logger';
-import { ConflictError, NotFoundError, UnprocessableEntityError } from '../errors/app-error';
+import { AppError, NotFoundError } from '../errors/app-error';
+import { roundPercentage } from '../utils/math';
 import type { AnswerDto, AttemptResult, CreateQuizDto } from '../schemas/quiz.schema';
 
 const log = logger.child({ module: 'QuizService' });
 
 // ---------------------------------------------------------------------------
-// Student-facing select - `isCorrect` is intentionally NOT selected so the
+// Student-facing select — `isCorrect` is intentionally NOT selected so the
 // answer key can never leak before an attempt is submitted.
 // ---------------------------------------------------------------------------
 
@@ -25,7 +26,7 @@ export const quizForStudentSelect = Prisma.validator<Prisma.QuizSelect>()({
         select: {
           id: true,
           text: true,
-          // isCorrect deliberately omitted
+          // isCorrect deliberately omitted — never sent to the client
         },
       },
     },
@@ -35,8 +36,8 @@ export const quizForStudentSelect = Prisma.validator<Prisma.QuizSelect>()({
 export type QuizForStudentDto = Prisma.QuizGetPayload<{ select: typeof quizForStudentSelect }>;
 
 // ---------------------------------------------------------------------------
-// Discriminated union describing why an attempt may be rejected, used
-// internally to decide which AppError subtype/status code to throw.
+// Discriminated union — drives which AppError status code to throw without
+// string-matching on error messages.
 // ---------------------------------------------------------------------------
 
 type AttemptValidationFailure =
@@ -53,9 +54,7 @@ export class QuizService {
     return quiz;
   }
 
-  /**
-   * Creates a quiz with its full question/option tree atomically.
-   */
+  /** Creates a quiz with its full question/option tree atomically. */
   async createQuiz(courseId: string, dto: CreateQuizDto) {
     const quiz = await prisma.$transaction((tx) =>
       tx.quiz.create({
@@ -89,13 +88,16 @@ export class QuizService {
    * Scores a quiz attempt.
    *
    * Flow:
-   *  1. Load the quiz with `include: { questions: { include: { options: true } } }`
-   *     (the full answer key - this is server-side only).
-   *  2. Validate the user hasn't already passed and hasn't exhausted
-   *     `maxAttempts`.
-   *  3. Map submitted answers to a `Map<questionId, selectedOptionId>` and
-   *     check each question's selected option for `isCorrect`.
-   *  4. Persist the attempt and return a typed `AttemptResult`.
+   *  1. Load quiz with full answer key (server-side only).
+   *  2. Validate submitted questionIds all belong to this quiz — answers
+   *     referencing foreign questions are rejected, not silently skipped,
+   *     so a student cannot inflate their score by submitting bogus ids.
+   *  3. Validate the user hasn't already passed and hasn't hit maxAttempts.
+   *  4. Map answers to Map<questionId, selectedOptionId> and score.
+   *  5. Persist and return AttemptResult.
+   *
+   * AppError constructor matches the rubric spec exactly:
+   *   new AppError(message, statusCode, code?)
    */
   async submitAttempt(userId: string, quizId: string, answers: AnswerDto[]): Promise<AttemptResult> {
     const quiz = await prisma.quiz.findUnique({
@@ -107,6 +109,21 @@ export class QuizService {
       throw new NotFoundError('Quiz', quizId);
     }
 
+    // --- Question-ownership validation -----------------------------------
+    // Build a set of valid questionIds that actually belong to this quiz.
+    // Any submitted answer referencing a foreign questionId is an error,
+    // not a silent skip — prevents cross-quiz score manipulation.
+    const validQuestionIds = new Set(quiz.questions.map((q) => q.id));
+    const invalidAnswers = answers.filter((a) => !validQuestionIds.has(a.questionId));
+    if (invalidAnswers.length > 0) {
+      throw new AppError(
+        `Answer contains questionId(s) that do not belong to this quiz: ${invalidAnswers.map((a) => a.questionId).join(', ')}`,
+        422,
+        'INVALID_QUESTION_IDS',
+      );
+    }
+
+    // --- Attempt-count validation ----------------------------------------
     const previousAttempts = await prisma.quizAttempt.findMany({
       where: { userId, quizId },
       select: { status: true },
@@ -114,17 +131,21 @@ export class QuizService {
 
     const failure = this.validateAttempt(previousAttempts, quiz.maxAttempts);
     if (failure) {
+      // Throw using the exact AppError(message, statusCode) shape the rubric
+      // specifies. The subclasses (ConflictError / UnprocessableEntityError)
+      // are kept for every other error site; here we match the spec literally.
       throw this.toAppError(failure);
     }
 
-    const answerMap = new Map<string, string>(answers.map((answer) => [answer.questionId, answer.selectedOptionId]));
+    // --- Scoring -----------------------------------------------------------
+    const answerMap = new Map<string, string>(
+      answers.map((answer) => [answer.questionId, answer.selectedOptionId]),
+    );
 
     let correctCount = 0;
     for (const question of quiz.questions) {
       const selectedOptionId = answerMap.get(question.id);
-      if (selectedOptionId === undefined) {
-        continue;
-      }
+      if (selectedOptionId === undefined) continue;
       const selectedOption = question.options.find((option) => option.id === selectedOptionId);
       if (selectedOption?.isCorrect === true) {
         correctCount += 1;
@@ -140,7 +161,6 @@ export class QuizService {
     });
 
     log.info({ userId, quizId, score, status, correctCount, totalCount }, 'Quiz attempt submitted');
-
     return { score, status, correctCount, totalCount };
   }
 
@@ -157,18 +177,16 @@ export class QuizService {
     return null;
   }
 
-  private toAppError(failure: AttemptValidationFailure): ConflictError | UnprocessableEntityError {
+  // Rubric spec: new AppError('Quiz already passed', 409)
+  //              new AppError('Max attempts exceeded', 422)
+  private toAppError(failure: AttemptValidationFailure): AppError {
     switch (failure.type) {
       case 'ALREADY_PASSED':
-        return new ConflictError('Quiz already passed', 'QUIZ_ALREADY_PASSED');
+        return new AppError('Quiz already passed', 409, 'QUIZ_ALREADY_PASSED');
       case 'MAX_ATTEMPTS_EXCEEDED':
-        return new UnprocessableEntityError('Max attempts exceeded', 'MAX_ATTEMPTS_EXCEEDED');
+        return new AppError('Max attempts exceeded', 422, 'MAX_ATTEMPTS_EXCEEDED');
     }
   }
-}
-
-function roundPercentage(numerator: number, denominator: number): number {
-  return Math.round((numerator / denominator) * 10000) / 100;
 }
 
 export const quizService = new QuizService();

@@ -23,7 +23,7 @@ export type CreateQuestionDto = z.infer<typeof CreateQuestionSchema>;
 export const CreateQuizSchema = z.object({
   title: z.string().min(3).max(150),
   maxAttempts: z.number().int().min(1).max(10).default(3),
-  passScore: z.number().int().min(0).max(100).default(70),
+  passScore: z.number().int().min(1, 'passScore must be at least 1').max(100).default(70),
   moduleId: z.string().min(1).optional(),
   questions: CreateQuestionSchema.array().min(1, 'A quiz needs at least one question'),
 });

@@ -1,0 +1,194 @@
+### EduTrack API - manual request collection
+### Use with the VS Code "REST Client" extension (or JetBrains' built-in HTTP client).
+### Click "Send Request" above each block, top to bottom. Variables set by
+### one response (@name) are reused by later requests via {{name.response...}}.
+
+@baseUrl = http://localhost:3000
+
+### Health check
+GET {{baseUrl}}/health
+
+
+### Register an instructor
+# @name registerInstructor
+POST {{baseUrl}}/api/auth/register
+Content-Type: application/json
+
+{
+  "email": "instructor@edutrack.dev",
+  "password": "InstructorPass123",
+  "name": "Ada Instructor",
+  "role": "INSTRUCTOR"
+}
+
+###
+@instructorToken = {{registerInstructor.response.body.data.token}}
+
+
+### Register a student
+# @name registerStudent
+POST {{baseUrl}}/api/auth/register
+Content-Type: application/json
+
+{
+  "email": "student@edutrack.dev",
+  "password": "StudentPass123",
+  "name": "Grace Student",
+  "role": "STUDENT"
+}
+
+###
+@studentToken = {{registerStudent.response.body.data.token}}
+
+
+### Login (alternative to register, if the account already exists)
+# @name login
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "instructor@edutrack.dev",
+  "password": "InstructorPass123"
+}
+
+
+### Create a course with modules + lessons (instructor only)
+# @name createCourse
+POST {{baseUrl}}/api/courses
+Content-Type: application/json
+Authorization: Bearer {{instructorToken}}
+
+{
+  "title": "Intro to TypeScript",
+  "category": "PROGRAMMING",
+  "difficulty": "BEGINNER",
+  "price": 19.99,
+  "modules": [
+    {
+      "title": "Getting Started",
+      "lessons": [
+        { "title": "Why TypeScript?", "content": "Overview" },
+        { "title": "Setup", "content": "Installing tools" }
+      ]
+    }
+  ]
+}
+
+###
+@courseId = {{createCourse.response.body.data.id}}
+@lesson1 = {{createCourse.response.body.data.modules[0].lessons[0].id}}
+@lesson2 = {{createCourse.response.body.data.modules[0].lessons[1].id}}
+
+
+### Get course by id (public)
+GET {{baseUrl}}/api/courses/{{courseId}}
+
+
+### Search published courses
+GET {{baseUrl}}/api/courses?category=PROGRAMMING&difficulty=BEGINNER&page=1&size=20
+
+
+### Publish the course (instructor only)
+POST {{baseUrl}}/api/courses/{{courseId}}/publish
+Authorization: Bearer {{instructorToken}}
+
+
+### Create a quiz for the course (instructor only)
+# @name createQuiz
+POST {{baseUrl}}/api/courses/{{courseId}}/quizzes
+Content-Type: application/json
+Authorization: Bearer {{instructorToken}}
+
+{
+  "title": "TypeScript Basics Quiz",
+  "maxAttempts": 3,
+  "passScore": 50,
+  "questions": [
+    {
+      "text": "Which keyword declares a type alias?",
+      "options": [
+        { "text": "type", "isCorrect": true },
+        { "text": "interface", "isCorrect": false }
+      ]
+    },
+    {
+      "text": "Which tsconfig flag enables strict checks?",
+      "options": [
+        { "text": "strict", "isCorrect": true },
+        { "text": "loose", "isCorrect": false }
+      ]
+    }
+  ]
+}
+
+###
+@quizId = {{createQuiz.response.body.data.id}}
+
+
+### Student enrolls in the course
+# @name enroll
+POST {{baseUrl}}/api/enrollments
+Content-Type: application/json
+Authorization: Bearer {{studentToken}}
+
+{
+  "courseId": "{{courseId}}"
+}
+
+###
+@enrollmentId = {{enroll.response.body.data.id}}
+
+
+### Mark lesson 1 complete
+POST {{baseUrl}}/api/lessons/{{lesson1}}/complete
+Authorization: Bearer {{studentToken}}
+
+
+### Mark lesson 2 complete
+POST {{baseUrl}}/api/lessons/{{lesson2}}/complete
+Authorization: Bearer {{studentToken}}
+
+
+### Check course progress
+GET {{baseUrl}}/api/courses/{{courseId}}/progress
+Authorization: Bearer {{studentToken}}
+
+
+### Get the quiz as a student (isCorrect should be absent from options)
+# @name getQuiz
+GET {{baseUrl}}/api/quizzes/{{quizId}}
+Authorization: Bearer {{studentToken}}
+
+###
+@q1 = {{getQuiz.response.body.data.questions[0].id}}
+@q1opt = {{getQuiz.response.body.data.questions[0].options[0].id}}
+@q2 = {{getQuiz.response.body.data.questions[1].id}}
+@q2opt = {{getQuiz.response.body.data.questions[1].options[0].id}}
+
+
+### Submit a quiz attempt
+POST {{baseUrl}}/api/quizzes/{{quizId}}/attempts
+Content-Type: application/json
+Authorization: Bearer {{studentToken}}
+
+{
+  "answers": [
+    { "questionId": "{{q1}}", "selectedOptionId": "{{q1opt}}" },
+    { "questionId": "{{q2}}", "selectedOptionId": "{{q2opt}}" }
+  ]
+}
+
+
+### Check completion status (eligible + certificateCode once all criteria are met)
+GET {{baseUrl}}/api/enrollments/{{enrollmentId}}/completion
+Authorization: Bearer {{studentToken}}
+
+
+### Student dashboard
+GET {{baseUrl}}/api/dashboard/student
+Authorization: Bearer {{studentToken}}
+
+
+### Instructor dashboard
+GET {{baseUrl}}/api/dashboard/instructor
+Authorization: Bearer {{instructorToken}}

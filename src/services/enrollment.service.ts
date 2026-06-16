@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import prisma from '../prisma';
 import { logger } from '../utils/logger';
+import { roundPercentage } from '../utils/math';
 import { ConflictError, ForbiddenError, NotFoundError, UnprocessableEntityError } from '../errors/app-error';
 import type { CompletionStatusDto, ProgressDto } from '../schemas/enrollment.schema';
 
@@ -166,10 +167,6 @@ export class EnrollmentService {
 
     return passedQuizzes.length >= totalQuizzes;
   }
-}
-
-function roundPercentage(numerator: number, denominator: number): number {
-  return Math.round((numerator / denominator) * 10000) / 100;
 }
 
 export const enrollmentService = new EnrollmentService();

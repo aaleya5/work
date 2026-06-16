@@ -110,11 +110,13 @@ describe('QuizService.submitAttempt', () => {
     mockedPrisma.quiz.findUnique.mockResolvedValue(quiz);
     mockedPrisma.quizAttempt.findMany.mockResolvedValue([{ status: 'PASSED' }]);
 
-    await expect(service.submitAttempt('user-1', quiz.id, answersForQuiz(quiz, 5))).rejects.toMatchObject({
-      statusCode: 409,
-      code: 'QUIZ_ALREADY_PASSED',
-    });
+    const error: unknown = await service
+      .submitAttempt('user-1', quiz.id, answersForQuiz(quiz, 5))
+      .catch((e) => e);
 
+    expect(error).toBeInstanceOf(AppError);
+    expect((error as AppError).statusCode).toBe(409);
+    expect((error as AppError).message).toBe('Quiz already passed');
     expect(mockedPrisma.quizAttempt.create).not.toHaveBeenCalled();
   });
 
@@ -133,7 +135,7 @@ describe('QuizService.submitAttempt', () => {
 
     expect(error).toBeInstanceOf(AppError);
     expect((error as AppError).statusCode).toBe(422);
-    expect((error as AppError).code).toBe('MAX_ATTEMPTS_EXCEEDED');
+    expect((error as AppError).message).toBe('Max attempts exceeded');
     expect(mockedPrisma.quizAttempt.create).not.toHaveBeenCalled();
   });
 
