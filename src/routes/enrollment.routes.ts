@@ -7,7 +7,15 @@ import { ok } from '../types/api-response';
 export default async function enrollmentRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.post(
     '/api/enrollments',
-    { onRequest: [fastify.authorize('STUDENT')] },
+    {
+      onRequest: [fastify.authorize('STUDENT')],
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: '1 minute',
+        },
+      },
+    },
     async (request, reply): Promise<void> => {
       const dto = EnrollSchema.parse(request.body);
       const enrollment = await enrollmentService.enroll(request.user.id, dto.courseId);

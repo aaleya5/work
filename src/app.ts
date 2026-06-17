@@ -2,6 +2,8 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { env } from './config/env';
 import errorHandlerPlugin from './plugins/error-handler.plugin';
 import authPlugin from './plugins/auth.plugin';
+import swaggerPlugin from './plugins/swagger.plugin';
+import rateLimitPlugin from './plugins/rate-limit.plugin';
 import authRoutes from './routes/auth.routes';
 import courseRoutes from './routes/course.routes';
 import enrollmentRoutes from './routes/enrollment.routes';
@@ -19,15 +21,9 @@ import dashboardRoutes from './routes/dashboard.routes';
  * structured, non-request-scoped logging (see `utils/logger.ts`).
  */
 export async function buildApp(): Promise<FastifyInstance> {
-  // `env.LOG_LEVEL` is validated at startup by Zod (see src/config/env.ts).
-  // Passing it here as `logger.level` means every Fastify request log, plugin
-  // log, and `request.log.*` call in route handlers all respect LOG_LEVEL.
-  // Service-level logs (via `src/utils/logger.ts`) read the same env var
-  // through the shared pino instance, so the entire application honours a
-  // single LOG_LEVEL environment variable.
   const app = Fastify({
     logger: {
-      level: env.LOG_LEVEL,          // ← explicitly wired from process.env.LOG_LEVEL
+      level: env.LOG_LEVEL,
       transport:
         env.NODE_ENV === 'development'
           ? { target: 'pino-pretty', options: { colorize: true, translateTime: 'HH:MM:ss', ignore: 'pid,hostname' } }
@@ -35,8 +31,10 @@ export async function buildApp(): Promise<FastifyInstance> {
     },
   });
 
+  await app.register(swaggerPlugin);
   await app.register(errorHandlerPlugin);
   await app.register(authPlugin);
+  await app.register(rateLimitPlugin);
 
   await app.register(authRoutes);
   await app.register(courseRoutes);

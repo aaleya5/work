@@ -185,12 +185,18 @@ describe('CourseService.delete', () => {
   beforeEach(() => { svc = new CourseService(); jest.clearAllMocks(); });
 
   it('(a) resolves without error on success', async () => {
-    db.course.delete.mockResolvedValue(undefined);
+    db.course.update.mockResolvedValue(record());
     await expect(svc.delete('c1')).resolves.toBeUndefined();
+    expect(db.course.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'c1' },
+        data: expect.objectContaining({ deletedAt: expect.any(Date) }),
+      }),
+    );
   });
 
   it('(b) throws NotFoundError 404 on Prisma P2025', async () => {
-    db.course.delete.mockRejectedValue(p2025());
+    db.course.update.mockRejectedValue(p2025());
     await expect(svc.delete('bad')).rejects.toBeInstanceOf(NotFoundError);
   });
 });

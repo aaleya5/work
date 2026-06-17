@@ -10,29 +10,42 @@ import { courseService } from '../services/course.service';
 import { searchService } from '../services/dashboard.service';
 import { ForbiddenError } from '../errors/app-error';
 import { ok } from '../types/api-response';
+import { zodSchema } from '../plugins/swagger.plugin';
 
 export default async function courseRoutes(fastify: FastifyInstance): Promise<void> {
   // ---------------------------------------------------------------------
   // Public: search + read
   // ---------------------------------------------------------------------
 
-  fastify.get('/api/courses', async (request, reply): Promise<void> => {
-    const filters = CourseFiltersSchema.parse(request.query);
-    const result = await searchService.searchCourses(filters);
-    reply.status(200).send(ok(result));
-  });
+  fastify.get(
+    '/api/courses',
+    { schema: { tags: ['courses'], querystring: zodSchema(CourseFiltersSchema) } },
+    async (request, reply): Promise<void> => {
+      const filters = CourseFiltersSchema.parse(request.query);
+      const result = await searchService.searchCourses(filters);
+      reply.status(200).send(ok(result));
+    },
+  );
 
-  fastify.get('/api/courses/slug/:slug', async (request, reply): Promise<void> => {
-    const { slug } = request.params as { slug: string };
-    const course = await courseService.findBySlug(slug);
-    reply.status(200).send(ok(course));
-  });
+  fastify.get(
+    '/api/courses/slug/:slug',
+    { schema: { tags: ['courses'] } },
+    async (request, reply): Promise<void> => {
+      const { slug } = request.params as { slug: string };
+      const course = await courseService.findBySlug(slug);
+      reply.status(200).send(ok(course));
+    },
+  );
 
-  fastify.get('/api/courses/:id', async (request, reply): Promise<void> => {
-    const { id } = IdParamSchema.parse(request.params);
-    const course = await courseService.findById(id);
-    reply.status(200).send(ok(course));
-  });
+  fastify.get(
+    '/api/courses/:id',
+    { schema: { tags: ['courses'] } },
+    async (request, reply): Promise<void> => {
+      const { id } = IdParamSchema.parse(request.params);
+      const course = await courseService.findById(id);
+      reply.status(200).send(ok(course));
+    },
+  );
 
   // ---------------------------------------------------------------------
   // Instructor-only: create / update / delete / publish
@@ -40,7 +53,14 @@ export default async function courseRoutes(fastify: FastifyInstance): Promise<vo
 
   fastify.post(
     '/api/courses',
-    { onRequest: [fastify.authorize('INSTRUCTOR', 'ADMIN')] },
+    {
+      onRequest: [fastify.authorize('INSTRUCTOR', 'ADMIN')],
+      schema: {
+        tags: ['courses'],
+        security: [{ bearerAuth: [] }],
+        body: zodSchema(CourseWithModulesSchema),
+      },
+    },
     async (request, reply): Promise<void> => {
       const dto = CourseWithModulesSchema.parse(request.body);
       const course = await courseService.create(dto, request.user.id);
@@ -50,7 +70,14 @@ export default async function courseRoutes(fastify: FastifyInstance): Promise<vo
 
   fastify.patch(
     '/api/courses/:id',
-    { onRequest: [fastify.authorize('INSTRUCTOR', 'ADMIN')] },
+    {
+      onRequest: [fastify.authorize('INSTRUCTOR', 'ADMIN')],
+      schema: {
+        tags: ['courses'],
+        security: [{ bearerAuth: [] }],
+        body: zodSchema(UpdateCourseSchema),
+      },
+    },
     async (request, reply): Promise<void> => {
       const { id } = IdParamSchema.parse(request.params);
       const dto = UpdateCourseSchema.parse(request.body);
@@ -63,7 +90,10 @@ export default async function courseRoutes(fastify: FastifyInstance): Promise<vo
 
   fastify.delete(
     '/api/courses/:id',
-    { onRequest: [fastify.authorize('INSTRUCTOR', 'ADMIN')] },
+    {
+      onRequest: [fastify.authorize('INSTRUCTOR', 'ADMIN')],
+      schema: { tags: ['courses'], security: [{ bearerAuth: [] }] },
+    },
     async (request, reply): Promise<void> => {
       const { id } = IdParamSchema.parse(request.params);
 
@@ -75,7 +105,10 @@ export default async function courseRoutes(fastify: FastifyInstance): Promise<vo
 
   fastify.post(
     '/api/courses/:id/publish',
-    { onRequest: [fastify.authorize('INSTRUCTOR', 'ADMIN')] },
+    {
+      onRequest: [fastify.authorize('INSTRUCTOR', 'ADMIN')],
+      schema: { tags: ['courses'], security: [{ bearerAuth: [] }] },
+    },
     async (request, reply): Promise<void> => {
       const { id } = IdParamSchema.parse(request.params);
 

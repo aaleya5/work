@@ -145,10 +145,16 @@ export class CourseService {
     }
   }
 
+  /**
+   * Soft-deletes the course by stamping `deletedAt`. The Prisma Client
+   * Extension in `src/prisma.ts` then transparently excludes this row
+   * from `findMany` / `findFirst` / `count` / `findUnique` everywhere
+   * else in the app, so callers don't need to know the deletion is soft.
+   */
   async delete(id: string): Promise<void> {
     try {
-      await prisma.course.delete({ where: { id } });
-      log.info({ courseId: id }, 'Course deleted');
+      await prisma.course.update({ where: { id }, data: { deletedAt: new Date() } });
+      log.info({ courseId: id }, 'Course soft-deleted');
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
         throw new NotFoundError('Course', id);
