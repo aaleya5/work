@@ -1,22 +1,13 @@
 /**
  * EnrollmentService unit tests
  *
- * Covers the core business rules:
- *   - cannot enroll in unpublished course
- *   - duplicate enroll (P2002) → ConflictError 409
- *   - markLessonComplete requires enrollment
- *   - getProgress returns correct percentage
- *   - getCompletionStatus issues and freezes certificate code
+ * Covers: enroll (4 cases), markLessonComplete (3 cases),
+ * getProgress (4 cases), getCompletionStatus (5 cases) = 16 total.
  */
 
 import { EnrollmentService } from '../../src/services/enrollment.service';
 import prisma from '../../src/prisma';
-import {
-  ConflictError,
-  ForbiddenError,
-  NotFoundError,
-  UnprocessableEntityError,
-} from '../../src/errors/app-error';
+import { ConflictError, ForbiddenError, NotFoundError, UnprocessableEntityError } from '../../src/errors/app-error';
 import { Prisma } from '@prisma/client';
 
 jest.mock('../../src/prisma', () => ({
@@ -28,7 +19,12 @@ jest.mock('../../src/prisma', () => ({
     lessonProgress: { upsert: jest.fn(), count: jest.fn() },
     quiz: { count: jest.fn() },
     quizAttempt: { findMany: jest.fn() },
-    $transaction: jest.fn(),
+    // $transaction is called two ways in EnrollmentService:
+    //   • array form:    $transaction([promise, promise]) → awaits all
+    //   • callback form: $transaction(fn) → calls fn(tx) [not used here]
+    $transaction: jest.fn((arg: unknown) =>
+      Array.isArray(arg) ? Promise.all(arg) : Promise.resolve(null),
+    ),
   },
 }));
 
@@ -41,190 +37,167 @@ type MockedPrisma = {
   quizAttempt: { findMany: jest.Mock };
   $transaction: jest.Mock;
 };
-
 const db = prisma as unknown as MockedPrisma;
 
 // ---------------------------------------------------------------------------
 // enroll()
 // ---------------------------------------------------------------------------
-
 describe('EnrollmentService.enroll', () => {
-  let service: EnrollmentService;
+  let svc: EnrollmentService;
+  beforeEach(() => { svc = new EnrollmentService(); jest.clearAllMocks(); });
 
-  beforeEach(() => {
-    service = new EnrollmentService();
-    jest.clearAllMocks();
-  });
-
-  it('throws NotFoundError (404) when the course does not exist', async () => {
+  it('(a) throws NotFoundError 404 when the course does not exist', async () => {
     db.course.findUnique.mockResolvedValue(null);
-    await expect(service.enroll('user-1', 'course-x')).rejects.toBeInstanceOf(NotFoundError);
-    await expect(service.enroll('user-1', 'course-x')).rejects.toMatchObject({ statusCode: 404 });
+    await expect(svc.enroll('u1', 'c-bad')).rejects.toBeInstanceOf(NotFoundError);
+    await expect(svc.enroll('u1', 'c-bad')).rejects.toMatchObject({ statusCode: 404 });
   });
 
-  it('throws UnprocessableEntityError (422) when the course is not published', async () => {
-    db.course.findUnique.mockResolvedValue({ id: 'course-1', published: false });
-    await expect(service.enroll('user-1', 'course-1')).rejects.toBeInstanceOf(UnprocessableEntityError);
-    await expect(service.enroll('user-1', 'course-1')).rejects.toMatchObject({ statusCode: 422 });
+  it('(b) throws UnprocessableEntityError 422 when the course is unpublished', async () => {
+    db.course.findUnique.mockResolvedValue({ id: 'c1', published: false });
+    await expect(svc.enroll('u1', 'c1')).rejects.toBeInstanceOf(UnprocessableEntityError);
+    await expect(svc.enroll('u1', 'c1')).rejects.toMatchObject({ statusCode: 422, code: 'COURSE_NOT_PUBLISHED' });
   });
 
-  it('creates and returns an enrollment when the course is published', async () => {
-    db.course.findUnique.mockResolvedValue({ id: 'course-1', published: true });
-    const enrollment = { id: 'enroll-1', userId: 'user-1', courseId: 'course-1', enrolledAt: new Date(), certificateCode: null };
+  it('(c) creates and returns an enrollment for a published course', async () => {
+    db.course.findUnique.mockResolvedValue({ id: 'c1', published: true });
+    const enrollment = { id: 'e1', userId: 'u1', courseId: 'c1', enrolledAt: new Date(), certificateCode: null };
     db.enrollment.create.mockResolvedValue(enrollment);
-
-    const result = await service.enroll('user-1', 'course-1');
-    expect(result.id).toBe('enroll-1');
+    const result = await svc.enroll('u1', 'c1');
+    expect(result.id).toBe('e1');
     expect(db.enrollment.create).toHaveBeenCalledTimes(1);
   });
 
-  it('throws ConflictError (409) on duplicate enrollment (Prisma P2002)', async () => {
-    db.course.findUnique.mockResolvedValue({ id: 'course-1', published: true });
+  it('(d) throws ConflictError 409 on P2002 unique constraint (duplicate enrollment)', async () => {
+    db.course.findUnique.mockResolvedValue({ id: 'c1', published: true });
     db.enrollment.create.mockRejectedValue(
-      new Prisma.PrismaClientKnownRequestError('Unique constraint', { code: 'P2002', clientVersion: '5.x' }),
+      new Prisma.PrismaClientKnownRequestError('Unique', { code: 'P2002', clientVersion: '5.x' }),
     );
-    await expect(service.enroll('user-1', 'course-1')).rejects.toBeInstanceOf(ConflictError);
-    await expect(service.enroll('user-1', 'course-1')).rejects.toMatchObject({ statusCode: 409 });
+    await expect(svc.enroll('u1', 'c1')).rejects.toBeInstanceOf(ConflictError);
+    await expect(svc.enroll('u1', 'c1')).rejects.toMatchObject({ statusCode: 409, code: 'ALREADY_ENROLLED' });
   });
 });
 
 // ---------------------------------------------------------------------------
 // markLessonComplete()
 // ---------------------------------------------------------------------------
-
 describe('EnrollmentService.markLessonComplete', () => {
-  let service: EnrollmentService;
+  let svc: EnrollmentService;
+  beforeEach(() => { svc = new EnrollmentService(); jest.clearAllMocks(); });
 
-  beforeEach(() => {
-    service = new EnrollmentService();
-    jest.clearAllMocks();
-  });
-
-  it('throws NotFoundError (404) when the lesson does not exist', async () => {
+  it('(a) throws NotFoundError 404 when the lesson does not exist', async () => {
     db.lesson.findUnique.mockResolvedValue(null);
-    await expect(service.markLessonComplete('user-1', 'lesson-x')).rejects.toBeInstanceOf(NotFoundError);
+    await expect(svc.markLessonComplete('u1', 'l-bad')).rejects.toBeInstanceOf(NotFoundError);
   });
 
-  it('throws ForbiddenError (403) when the user is not enrolled in the lesson\'s course', async () => {
-    db.lesson.findUnique.mockResolvedValue({ id: 'lesson-1', module: { courseId: 'course-1' } });
-    db.enrollment.findUnique.mockResolvedValue(null); // not enrolled
-    await expect(service.markLessonComplete('user-1', 'lesson-1')).rejects.toBeInstanceOf(ForbiddenError);
-    await expect(service.markLessonComplete('user-1', 'lesson-1')).rejects.toMatchObject({ statusCode: 403 });
+  it('(b) throws ForbiddenError 403 when the user is not enrolled in the lesson\'s course', async () => {
+    db.lesson.findUnique.mockResolvedValue({ id: 'l1', module: { courseId: 'c1' } });
+    db.enrollment.findUnique.mockResolvedValue(null);
+    await expect(svc.markLessonComplete('u1', 'l1')).rejects.toBeInstanceOf(ForbiddenError);
+    await expect(svc.markLessonComplete('u1', 'l1')).rejects.toMatchObject({ statusCode: 403 });
   });
 
-  it('upserts progress and returns updated progress on success', async () => {
-    db.lesson.findUnique.mockResolvedValue({ id: 'lesson-1', module: { courseId: 'course-1' } });
-    db.enrollment.findUnique.mockResolvedValue({ id: 'enroll-1' });
+  it('(c) upserts progress and returns updated percentage', async () => {
+    db.lesson.findUnique.mockResolvedValue({ id: 'l1', module: { courseId: 'c1' } });
+    db.enrollment.findUnique.mockResolvedValue({ id: 'e1' });
     db.lessonProgress.upsert.mockResolvedValue({});
-    db.$transaction.mockResolvedValue([2, 1]); // 2 total, 1 completed
-
-    const progress = await service.markLessonComplete('user-1', 'lesson-1');
-
-    expect(db.lessonProgress.upsert).toHaveBeenCalledTimes(1);
-    expect(progress.totalLessons).toBe(2);
-    expect(progress.completedLessons).toBe(1);
-    expect(progress.percentage).toBe(50);
+    db.lesson.count.mockResolvedValue(4);
+    db.lessonProgress.count.mockResolvedValue(2);
+    const result = await svc.markLessonComplete('u1', 'l1');
+    expect(result.percentage).toBe(50);
+    expect(result.totalLessons).toBe(4);
+    expect(result.completedLessons).toBe(2);
   });
 });
 
 // ---------------------------------------------------------------------------
 // getProgress()
 // ---------------------------------------------------------------------------
-
 describe('EnrollmentService.getProgress', () => {
-  let service: EnrollmentService;
+  let svc: EnrollmentService;
+  beforeEach(() => { svc = new EnrollmentService(); jest.clearAllMocks(); });
 
-  beforeEach(() => {
-    service = new EnrollmentService();
-    jest.clearAllMocks();
+  it('(a) returns 0% when no lessons are completed', async () => {
+    db.lesson.count.mockResolvedValue(4);
+    db.lessonProgress.count.mockResolvedValue(0);
+    const r = await svc.getProgress('u1', 'c1');
+    expect(r.percentage).toBe(0);
+    expect(r.completedLessons).toBe(0);
   });
 
-  it('returns 0% when no lessons are completed', async () => {
-    db.$transaction.mockResolvedValue([4, 0]);
-    const progress = await service.getProgress('user-1', 'course-1');
-    expect(progress.percentage).toBe(0);
-    expect(progress.completedLessons).toBe(0);
-    expect(progress.totalLessons).toBe(4);
+  it('(b) returns 100% when all lessons are completed', async () => {
+    db.lesson.count.mockResolvedValue(3);
+    db.lessonProgress.count.mockResolvedValue(3);
+    const r = await svc.getProgress('u1', 'c1');
+    expect(r.percentage).toBe(100);
   });
 
-  it('returns 100% when all lessons are completed', async () => {
-    db.$transaction.mockResolvedValue([3, 3]);
-    const progress = await service.getProgress('user-1', 'course-1');
-    expect(progress.percentage).toBe(100);
+  it('(c) returns 0% (not NaN) when the course has no lessons', async () => {
+    db.lesson.count.mockResolvedValue(0);
+    db.lessonProgress.count.mockResolvedValue(0);
+    const r = await svc.getProgress('u1', 'c1');
+    expect(r.percentage).toBe(0);
+    expect(Number.isNaN(r.percentage)).toBe(false);
   });
 
-  it('returns 0% (not NaN) when the course has no lessons', async () => {
-    db.$transaction.mockResolvedValue([0, 0]);
-    const progress = await service.getProgress('user-1', 'course-1');
-    expect(progress.percentage).toBe(0);
-    expect(Number.isNaN(progress.percentage)).toBe(false);
-  });
-
-  it('rounds fractional percentages correctly (1/3 = 33.33)', async () => {
-    db.$transaction.mockResolvedValue([3, 1]);
-    const progress = await service.getProgress('user-1', 'course-1');
-    expect(progress.percentage).toBe(33.33);
+  it('(d) rounds 1/3 to 33.33 — uses shared roundPercentage util', async () => {
+    db.lesson.count.mockResolvedValue(3);
+    db.lessonProgress.count.mockResolvedValue(1);
+    const r = await svc.getProgress('u1', 'c1');
+    expect(r.percentage).toBe(33.33);
   });
 });
 
 // ---------------------------------------------------------------------------
 // getCompletionStatus()
 // ---------------------------------------------------------------------------
-
 describe('EnrollmentService.getCompletionStatus', () => {
-  let service: EnrollmentService;
+  let svc: EnrollmentService;
+  beforeEach(() => { svc = new EnrollmentService(); jest.clearAllMocks(); });
 
-  beforeEach(() => {
-    service = new EnrollmentService();
-    jest.clearAllMocks();
-  });
-
-  it('throws NotFoundError (404) when the enrollment does not exist', async () => {
+  it('(a) throws NotFoundError 404 when the enrollment does not exist', async () => {
     db.enrollment.findUnique.mockResolvedValue(null);
-    await expect(service.getCompletionStatus('user-1', 'enroll-x')).rejects.toBeInstanceOf(NotFoundError);
+    await expect(svc.getCompletionStatus('u1', 'e-bad')).rejects.toBeInstanceOf(NotFoundError);
   });
 
-  it('throws ForbiddenError (403) when the enrollment belongs to a different user', async () => {
-    db.enrollment.findUnique.mockResolvedValue({ id: 'enroll-1', userId: 'other-user', courseId: 'course-1', certificateCode: null });
-    await expect(service.getCompletionStatus('user-1', 'enroll-1')).rejects.toBeInstanceOf(ForbiddenError);
+  it('(b) throws ForbiddenError 403 when the enrollment belongs to another user', async () => {
+    db.enrollment.findUnique.mockResolvedValue({ id: 'e1', userId: 'other', courseId: 'c1', certificateCode: null });
+    await expect(svc.getCompletionStatus('u1', 'e1')).rejects.toBeInstanceOf(ForbiddenError);
   });
 
-  it('returns eligible=false when lessons are incomplete', async () => {
-    db.enrollment.findUnique.mockResolvedValue({ id: 'enroll-1', userId: 'user-1', courseId: 'course-1', certificateCode: null });
-    db.$transaction.mockResolvedValue([3, 1]); // 3 total, only 1 done
+  it('(c) returns eligible=false when lessons are incomplete', async () => {
+    db.enrollment.findUnique.mockResolvedValue({ id: 'e1', userId: 'u1', courseId: 'c1', certificateCode: null });
+    db.lesson.count.mockResolvedValue(3);
+    db.lessonProgress.count.mockResolvedValue(1);
     db.quiz.count.mockResolvedValue(0);
-
-    const status = await service.getCompletionStatus('user-1', 'enroll-1');
-    expect(status.eligible).toBe(false);
-    expect(status.lessonsComplete).toBe(false);
-    expect(status.certificateCode).toBeNull();
+    const s = await svc.getCompletionStatus('u1', 'e1');
+    expect(s.eligible).toBe(false);
+    expect(s.lessonsComplete).toBe(false);
+    expect(s.certificateCode).toBeNull();
+    expect(db.enrollment.update).not.toHaveBeenCalled();
   });
 
-  it('returns eligible=true and generates a certificate code when all criteria are met', async () => {
-    db.enrollment.findUnique.mockResolvedValue({ id: 'enroll-1', userId: 'user-1', courseId: 'course-1', certificateCode: null });
-    db.$transaction.mockResolvedValue([2, 2]); // all lessons done
-    db.quiz.count.mockResolvedValue(0);        // no quizzes
+  it('(d) returns eligible=true and generates a UUID certificate when all criteria are met', async () => {
+    db.enrollment.findUnique.mockResolvedValue({ id: 'e1', userId: 'u1', courseId: 'c1', certificateCode: null });
+    db.lesson.count.mockResolvedValue(2);
+    db.lessonProgress.count.mockResolvedValue(2);
+    db.quiz.count.mockResolvedValue(0);
     db.enrollment.update.mockResolvedValue({});
-
-    const status = await service.getCompletionStatus('user-1', 'enroll-1');
-
-    expect(status.eligible).toBe(true);
-    expect(status.certificateCode).not.toBeNull();
-    expect(typeof status.certificateCode).toBe('string');
-    // Once issued, update must be called to persist the code
+    const s = await svc.getCompletionStatus('u1', 'e1');
+    expect(s.eligible).toBe(true);
+    expect(s.certificateCode).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
     expect(db.enrollment.update).toHaveBeenCalledTimes(1);
   });
 
-  it('does NOT regenerate a certificate code when one already exists', async () => {
-    const existingCode = 'existing-uuid-1234';
-    db.enrollment.findUnique.mockResolvedValue({ id: 'enroll-1', userId: 'user-1', courseId: 'course-1', certificateCode: existingCode });
-    db.$transaction.mockResolvedValue([2, 2]);
+  it('(e) does NOT regenerate the certificate if one already exists (immutable code)', async () => {
+    const code = 'existing-cert-code-1234';
+    db.enrollment.findUnique.mockResolvedValue({ id: 'e1', userId: 'u1', courseId: 'c1', certificateCode: code });
+    db.lesson.count.mockResolvedValue(2);
+    db.lessonProgress.count.mockResolvedValue(2);
     db.quiz.count.mockResolvedValue(0);
-
-    const status = await service.getCompletionStatus('user-1', 'enroll-1');
-
-    expect(status.certificateCode).toBe(existingCode);
-    // No update call — code was already set
+    const s = await svc.getCompletionStatus('u1', 'e1');
+    expect(s.certificateCode).toBe(code);
     expect(db.enrollment.update).not.toHaveBeenCalled();
   });
 });

@@ -1,13 +1,9 @@
 /**
  * CourseService unit tests
  *
- * Every Prisma call is mocked — no database needed.
- * Tests cover the service layer's business logic:
- *   - slug generation and uniqueness loop
- *   - transactional course creation
- *   - 404 on missing course
- *   - publish validation (needs at least one module with a lesson)
- *   - update and delete with P2025 → NotFoundError mapping
+ * Covers: create (transaction + slug uniqueness loop), findById,
+ * update (happy path + P2025 → 404), delete (happy path + P2025 → 404),
+ * publishCourse (404 missing, 422 no modules, 204 valid).
  */
 
 import { CourseService } from '../../src/services/course.service';
@@ -18,12 +14,7 @@ import { Prisma } from '@prisma/client';
 jest.mock('../../src/prisma', () => ({
   __esModule: true,
   default: {
-    course: {
-      findUnique: jest.fn(),
-      create: jest.fn(),
-      update: jest.fn(),
-      delete: jest.fn(),
-    },
+    course: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn(), delete: jest.fn() },
     courseModule: { count: jest.fn() },
     $transaction: jest.fn(),
   },
@@ -34,183 +25,180 @@ type MockedPrisma = {
   courseModule: { count: jest.Mock };
   $transaction: jest.Mock;
 };
-
 const db = prisma as unknown as MockedPrisma;
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
-
-const COURSE_DTO = {
+const DTO = {
   title: 'Intro to TypeScript',
   category: 'PROGRAMMING' as const,
   difficulty: 'BEGINNER' as const,
   price: 19.99,
-  modules: [
-    {
-      title: 'Getting Started',
-      lessons: [{ title: 'Why TS?', content: 'Overview' }],
-    },
-  ],
+  modules: [{ title: 'M1', lessons: [{ title: 'L1', content: 'C1' }] }],
 };
 
-function makeCourseRecord(overrides: object = {}) {
+function record(overrides: object = {}) {
   return {
-    id: 'course-1',
-    title: COURSE_DTO.title,
-    slug: 'intro-to-typescript',
-    category: 'PROGRAMMING',
-    difficulty: 'BEGINNER',
-    price: new Prisma.Decimal(19.99),
-    published: false,
-    instructorId: 'instructor-1',
-    createdAt: new Date(),
-    updatedAt: new Date(),
-    modules: [],
-    ...overrides,
+    id: 'c1', title: DTO.title, slug: 'intro-to-typescript',
+    category: 'PROGRAMMING', difficulty: 'BEGINNER',
+    price: new Prisma.Decimal(19.99), published: false,
+    instructorId: 'i1', createdAt: new Date(), updatedAt: new Date(),
+    modules: [], ...overrides,
   };
 }
 
+function p2025() {
+  return new Prisma.PrismaClientKnownRequestError('Not found', { code: 'P2025', clientVersion: '5.x' });
+}
+
+// ---------------------------------------------------------------------------
+// create()
+// ---------------------------------------------------------------------------
 describe('CourseService.create', () => {
-  let service: CourseService;
+  let svc: CourseService;
+  beforeEach(() => { svc = new CourseService(); jest.clearAllMocks(); });
 
-  beforeEach(() => {
-    service = new CourseService();
-    jest.clearAllMocks();
-  });
-
-  it('creates the course inside a transaction and returns a CourseDto with numeric price', async () => {
-    const record = makeCourseRecord();
-    db.course.findUnique.mockResolvedValue(null); // slug is available
+  it('(a) runs inside a $transaction and returns CourseDto with numeric price', async () => {
+    db.course.findUnique.mockResolvedValue(null);
     db.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) =>
-      fn({
-        course: {
-          create: jest.fn().mockResolvedValue(record),
-        },
-      }),
+      fn({ course: { create: jest.fn().mockResolvedValue(record()) } }),
     );
-
-    const result = await service.create(COURSE_DTO, 'instructor-1');
-
-    expect(result.id).toBe('course-1');
+    const result = await svc.create(DTO, 'i1');
+    expect(result.id).toBe('c1');
     expect(typeof result.price).toBe('number');
     expect(result.price).toBe(19.99);
+  });
+
+  it('(b) generates a slug from the title', async () => {
+    db.course.findUnique.mockResolvedValue(null);
+    db.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) =>
+      fn({ course: { create: jest.fn().mockResolvedValue(record()) } }),
+    );
+    const result = await svc.create(DTO, 'i1');
     expect(result.slug).toBe('intro-to-typescript');
   });
 
-  it('appends a numeric suffix when the slug already exists', async () => {
-    const record = makeCourseRecord({ slug: 'intro-to-typescript-1' });
-    // First findUnique (slug check for base slug) returns a hit; second returns null
+  it('(c) appends -1 suffix when the base slug is already taken', async () => {
     db.course.findUnique
-      .mockResolvedValueOnce({ id: 'other-course' }) // 'intro-to-typescript' taken
-      .mockResolvedValueOnce(null);                   // 'intro-to-typescript-1' free
-
+      .mockResolvedValueOnce({ id: 'other' }) // base slug taken
+      .mockResolvedValueOnce(null);            // -1 suffix is free
     db.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) =>
-      fn({ course: { create: jest.fn().mockResolvedValue(record) } }),
+      fn({ course: { create: jest.fn().mockResolvedValue(record({ slug: 'intro-to-typescript-1' })) } }),
     );
-
-    const result = await service.create(COURSE_DTO, 'instructor-1');
+    const result = await svc.create(DTO, 'i1');
     expect(result.slug).toBe('intro-to-typescript-1');
+  });
+
+  it('(d) keeps incrementing the suffix until a free slug is found', async () => {
+    db.course.findUnique
+      .mockResolvedValueOnce({ id: 'a' }) // base taken
+      .mockResolvedValueOnce({ id: 'b' }) // -1 taken
+      .mockResolvedValueOnce(null);        // -2 free
+    db.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) =>
+      fn({ course: { create: jest.fn().mockResolvedValue(record({ slug: 'intro-to-typescript-2' })) } }),
+    );
+    const result = await svc.create(DTO, 'i1');
+    expect(result.slug).toBe('intro-to-typescript-2');
   });
 });
 
+// ---------------------------------------------------------------------------
+// findById()
+// ---------------------------------------------------------------------------
 describe('CourseService.findById', () => {
-  let service: CourseService;
+  let svc: CourseService;
+  beforeEach(() => { svc = new CourseService(); jest.clearAllMocks(); });
 
-  beforeEach(() => {
-    service = new CourseService();
-    jest.clearAllMocks();
-  });
-
-  it('returns a CourseDto when the course exists', async () => {
-    db.course.findUnique.mockResolvedValue(makeCourseRecord());
-    const result = await service.findById('course-1');
-    expect(result.id).toBe('course-1');
+  it('(a) returns CourseDto when the course exists', async () => {
+    db.course.findUnique.mockResolvedValue(record());
+    const result = await svc.findById('c1');
+    expect(result.id).toBe('c1');
     expect(typeof result.price).toBe('number');
   });
 
-  it('throws NotFoundError (404) when the course does not exist', async () => {
+  it('(b) throws NotFoundError 404 when the course does not exist', async () => {
     db.course.findUnique.mockResolvedValue(null);
-    await expect(service.findById('bad-id')).rejects.toBeInstanceOf(NotFoundError);
-    await expect(service.findById('bad-id')).rejects.toMatchObject({ statusCode: 404 });
+    await expect(svc.findById('bad')).rejects.toBeInstanceOf(NotFoundError);
+    await expect(svc.findById('bad')).rejects.toMatchObject({ statusCode: 404 });
   });
 });
 
+// ---------------------------------------------------------------------------
+// update()
+// ---------------------------------------------------------------------------
 describe('CourseService.update', () => {
-  let service: CourseService;
+  let svc: CourseService;
+  beforeEach(() => { svc = new CourseService(); jest.clearAllMocks(); });
 
-  beforeEach(() => {
-    service = new CourseService();
-    jest.clearAllMocks();
-  });
-
-  it('updates the course and returns the new CourseDto', async () => {
-    const updated = makeCourseRecord({ price: new Prisma.Decimal(9.99) });
-    db.course.update.mockResolvedValue(updated);
-
-    const result = await service.update('course-1', { price: 9.99 });
+  it('(a) updates and returns the new CourseDto', async () => {
+    db.course.update.mockResolvedValue(record({ price: new Prisma.Decimal(9.99) }));
+    const result = await svc.update('c1', { price: 9.99 });
     expect(result.price).toBe(9.99);
   });
 
-  it('throws NotFoundError (404) when Prisma returns P2025', async () => {
-    db.course.update.mockRejectedValue(
-      new Prisma.PrismaClientKnownRequestError('Not found', { code: 'P2025', clientVersion: '5.x' }),
-    );
-    await expect(service.update('bad-id', { price: 0 })).rejects.toBeInstanceOf(NotFoundError);
+  it('(b) throws NotFoundError 404 on Prisma P2025', async () => {
+    db.course.update.mockRejectedValue(p2025());
+    await expect(svc.update('bad', { price: 0 })).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('(c) re-throws unexpected errors unwrapped', async () => {
+    db.course.update.mockRejectedValue(new Error('DB down'));
+    await expect(svc.update('c1', {})).rejects.toThrow('DB down');
   });
 });
 
+// ---------------------------------------------------------------------------
+// delete()
+// ---------------------------------------------------------------------------
 describe('CourseService.delete', () => {
-  let service: CourseService;
+  let svc: CourseService;
+  beforeEach(() => { svc = new CourseService(); jest.clearAllMocks(); });
 
-  beforeEach(() => {
-    service = new CourseService();
-    jest.clearAllMocks();
-  });
-
-  it('deletes the course without error', async () => {
+  it('(a) resolves without error on success', async () => {
     db.course.delete.mockResolvedValue({});
-    await expect(service.delete('course-1')).resolves.toBeUndefined();
+    await expect(svc.delete('c1')).resolves.toBeUndefined();
   });
 
-  it('throws NotFoundError (404) when Prisma returns P2025', async () => {
-    db.course.delete.mockRejectedValue(
-      new Prisma.PrismaClientKnownRequestError('Not found', { code: 'P2025', clientVersion: '5.x' }),
-    );
-    await expect(service.delete('bad-id')).rejects.toBeInstanceOf(NotFoundError);
+  it('(b) throws NotFoundError 404 on Prisma P2025', async () => {
+    db.course.delete.mockRejectedValue(p2025());
+    await expect(svc.delete('bad')).rejects.toBeInstanceOf(NotFoundError);
   });
 });
 
+// ---------------------------------------------------------------------------
+// publishCourse()
+// ---------------------------------------------------------------------------
 describe('CourseService.publishCourse', () => {
-  let service: CourseService;
+  let svc: CourseService;
+  beforeEach(() => { svc = new CourseService(); jest.clearAllMocks(); });
 
-  beforeEach(() => {
-    service = new CourseService();
-    jest.clearAllMocks();
-  });
-
-  it('throws NotFoundError (404) when the course does not exist', async () => {
+  it('(a) throws NotFoundError 404 when the course does not exist', async () => {
     db.course.findUnique.mockResolvedValue(null);
-    await expect(service.publishCourse('bad-id')).rejects.toBeInstanceOf(NotFoundError);
+    await expect(svc.publishCourse('bad')).rejects.toBeInstanceOf(NotFoundError);
   });
 
-  it('throws UnprocessableEntityError (422) when the course has no modules with lessons', async () => {
-    db.course.findUnique.mockResolvedValue({ id: 'course-1', published: false });
-    db.courseModule.count.mockResolvedValue(0); // no publishable modules
-
-    await expect(service.publishCourse('course-1')).rejects.toBeInstanceOf(UnprocessableEntityError);
-    await expect(service.publishCourse('course-1')).rejects.toMatchObject({ statusCode: 422 });
+  it('(b) throws UnprocessableEntityError 422 when there are no publishable modules', async () => {
+    db.course.findUnique.mockResolvedValue({ id: 'c1', published: false });
+    db.courseModule.count.mockResolvedValue(0);
+    await expect(svc.publishCourse('c1')).rejects.toBeInstanceOf(UnprocessableEntityError);
+    await expect(svc.publishCourse('c1')).rejects.toMatchObject({ statusCode: 422, code: 'COURSE_NOT_PUBLISHABLE' });
   });
 
-  it('calls course.update to flip published=true when validation passes', async () => {
-    db.course.findUnique.mockResolvedValue({ id: 'course-1', published: false });
-    db.courseModule.count.mockResolvedValue(1); // one module with at least one lesson
+  it('(c) calls course.update with published:true when validation passes', async () => {
+    db.course.findUnique.mockResolvedValue({ id: 'c1', published: false });
+    db.courseModule.count.mockResolvedValue(1);
     db.course.update.mockResolvedValue({});
-
-    await service.publishCourse('course-1');
-
+    await svc.publishCourse('c1');
     expect(db.course.update).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 'course-1' }, data: { published: true } }),
+      expect.objectContaining({ where: { id: 'c1' }, data: { published: true } }),
+    );
+  });
+
+  it('(d) uses courseModule.count with lessons:{ some:{} } filter — not a raw count', async () => {
+    db.course.findUnique.mockResolvedValue({ id: 'c1', published: false });
+    db.courseModule.count.mockResolvedValue(1);
+    db.course.update.mockResolvedValue({});
+    await svc.publishCourse('c1');
+    expect(db.courseModule.count).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ lessons: { some: {} } }) }),
     );
   });
 });

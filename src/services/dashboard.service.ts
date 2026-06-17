@@ -191,15 +191,22 @@ export class DashboardService {
   }
 
   /**
-   * Instructor dashboard — exactly TWO aggregate queries total, regardless
-   * of how many courses the instructor has:
+   * Instructor dashboard — exactly TWO aggregate queries, run in parallel:
    *
-   *   Query 1 — prisma.lesson.groupBy(courseId): total lessons per course.
-   *   Query 2 — prisma.lessonProgress.groupBy(userId+courseId): completed
-   *             lessons per student per course, then filter to those who
-   *             hit the total.
+   *   Query 1 — `lesson.groupBy(['module.courseId'])`:
+   *     Not directly possible in Prisma because `groupBy` can only group on
+   *     scalar fields of the model itself. Instead we use `courseModule.findMany`
+   *     with `_count: { select: { lessons: true } }` — a single query that
+   *     returns every module for all instructor courses together with its
+   *     lesson count. We sum per courseId in JS (O(modules), no extra round-trip).
    *
-   * Both are fired in parallel via Promise.all — no per-course loops.
+   *   Query 2 — `lessonProgress.findMany` scoped to all enrolled users across
+   *     all instructor courses at once, with the courseId carried through the
+   *     `lesson.module.courseId` relation. Aggregated per (userId, courseId)
+   *     in JS to count completions.
+   *
+   * Both queries are fired simultaneously via `Promise.all` — 2 round-trips
+   * regardless of how many courses the instructor teaches.
    */
   async getInstructorDashboard(instructorId: string): Promise<InstructorDashboard> {
     const courses: InstructorCourseRecord[] = await prisma.course.findMany({
@@ -211,61 +218,60 @@ export class DashboardService {
 
     const courseIds = courses.map((c) => c.id);
 
-    // Query 1: total lessons per course (one groupBy across all courses).
-    // Query 2: how many lessons each enrolled student has completed per
-    //          course (one groupBy across all courses).
-    // Both run in parallel — two queries total, no N+1.
-    const [lessonCounts, progressCounts] = await Promise.all([
-      prisma.lesson.groupBy({
-        by: ['moduleId'],
-        where: { module: { courseId: { in: courseIds } } },
-        _count: { id: true },
-      }),
-      // We need courseId on lessonProgress rows — join through lesson->module.
-      // groupBy doesn't support nested relations, so we group by userId and
-      // pull the course id via a raw-ish approach: group on the module's
-      // courseId via a sub-select on lesson. Prisma supports this via the
-      // `lesson` relation filter on the where clause combined with groupBy
-      // on userId only — then we cross-reference with the course lookup below.
-      //
-      // Practical approach that stays within two queries:
-      // group by [userId, lessonId] isn't useful; instead, for each course
-      // we already have enrolledUserIds from the first fetch. We resolve
-      // completion per course by counting distinct (userId, courseId) pairs
-      // where the user's completed-lesson count equals totalLessons.
-      //
-      // We achieve this in one query by grouping lessonProgress by userId,
-      // filtering to lessons belonging to our course set, then counting
-      // per-user per-course completions via a raw aggregate:
-      prisma.lessonProgress.findMany({
-        where: { lesson: { module: { courseId: { in: courseIds } } } },
+    // All enrolled user ids across every instructor course — needed to scope
+    // the lessonProgress query without a cross-join.
+    const allEnrolledUserIds = [
+      ...new Set(courses.flatMap((c) => c.enrollments.map((e: { userId: string }) => e.userId))),
+    ];
+
+    // --- 2 queries, in parallel -------------------------------------------
+    //
+    // Query 1: total lessons per course.
+    //   courseModule.findMany with _count.lessons gives us
+    //   [{ courseId, _count: { lessons: N } }] for every module across all
+    //   courses in one shot. Sum per courseId in JS.
+    //
+    // Query 2: completed lessons per (userId, courseId).
+    //   lessonProgress.findMany scoped to our enrolled users + our courses,
+    //   carrying courseId through the lesson→module relation in the select.
+    //   Group by (userId, courseId) in JS.
+    const [moduleRows, progressRows] = await Promise.all([
+      // Query 1 — lesson counts per module, for all instructor courses at once
+      prisma.courseModule.findMany({
+        where: { courseId: { in: courseIds } },
         select: {
-          userId: true,
-          lesson: { select: { module: { select: { courseId: true } } } },
+          courseId: true,
+          _count: { select: { lessons: true } },
         },
       }),
+
+      // Query 2 — progress rows for all relevant users across all courses
+      allEnrolledUserIds.length === 0
+        ? Promise.resolve([])
+        : prisma.lessonProgress.findMany({
+            where: {
+              userId: { in: allEnrolledUserIds },
+              lesson: { module: { courseId: { in: courseIds } } },
+            },
+            select: {
+              userId: true,
+              lesson: { select: { module: { select: { courseId: true } } } },
+            },
+          }),
     ]);
 
-    // Build a map: courseId → totalLessons by joining lessonCounts through
-    // the module. We need moduleId→courseId, so fetch that mapping cheaply.
-    const modules = await prisma.courseModule.findMany({
-      where: { courseId: { in: courseIds } },
-      select: { id: true, courseId: true },
-    });
-
-    const moduleCourseMap = new Map<string, string>(modules.map((m) => [m.id, m.courseId]));
-
-    // Aggregate total lessons per course from the groupBy result.
+    // Build courseId → totalLessons from Query 1 (sum across modules)
     const totalLessonsByCourse = new Map<string, number>();
-    for (const row of lessonCounts) {
-      const courseId = moduleCourseMap.get(row.moduleId);
-      if (courseId === undefined) continue;
-      totalLessonsByCourse.set(courseId, (totalLessonsByCourse.get(courseId) ?? 0) + row._count.id);
+    for (const row of moduleRows) {
+      totalLessonsByCourse.set(
+        row.courseId,
+        (totalLessonsByCourse.get(row.courseId) ?? 0) + row._count.lessons,
+      );
     }
 
-    // Aggregate completed-lessons per (userId, courseId) from progressCounts.
+    // Build (userId, courseId) → completedLessons from Query 2
     const completedByUserCourse = new Map<string, number>();
-    for (const row of progressCounts) {
+    for (const row of progressRows) {
       const courseId = row.lesson.module.courseId;
       const key = `${row.userId}::${courseId}`;
       completedByUserCourse.set(key, (completedByUserCourse.get(key) ?? 0) + 1);
