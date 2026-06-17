@@ -9,6 +9,7 @@ import { EnrollmentService } from '../../src/services/enrollment.service';
 import prisma from '../../src/prisma';
 import { ConflictError, ForbiddenError, NotFoundError, UnprocessableEntityError } from '../../src/errors/app-error';
 import { Prisma } from '@prisma/client';
+import { beforeEach, describe, expect, it, jest } from '@jest/globals';
 
 jest.mock('../../src/prisma', () => ({
   __esModule: true,
@@ -28,15 +29,42 @@ jest.mock('../../src/prisma', () => ({
   },
 }));
 
+type CourseLookupResult = { id: string; published: boolean } | null;
+type LessonLookupResult = { id: string; module: { courseId: string } } | null;
+type EnrollmentLookupResult =
+  | { id: string }
+  | { id: string; userId: string; courseId: string; certificateCode: string | null }
+  | null;
+type EnrollmentWriteResult = { id: string; userId: string; courseId: string; enrolledAt: Date; certificateCode: string | null };
+type LessonProgressWriteResult = { id: string; userId: string; completedAt: Date; lessonId: string };
+type QuizAttemptLookupResult = { quizId: string }[];
+
 type MockedPrisma = {
-  course: { findUnique: jest.Mock };
-  enrollment: { create: jest.Mock; findUnique: jest.Mock; update: jest.Mock };
-  lesson: { findUnique: jest.Mock; count: jest.Mock };
-  lessonProgress: { upsert: jest.Mock; count: jest.Mock };
-  quiz: { count: jest.Mock };
-  quizAttempt: { findMany: jest.Mock };
-  $transaction: jest.Mock;
+  course: {
+    findUnique: jest.MockedFunction<(args: unknown) => Promise<CourseLookupResult>>;
+  };
+  enrollment: {
+    create: jest.MockedFunction<(args: unknown) => Promise<EnrollmentWriteResult>>;
+    findUnique: jest.MockedFunction<(args: unknown) => Promise<EnrollmentLookupResult>>;
+    update: jest.MockedFunction<(args: unknown) => Promise<EnrollmentWriteResult>>;
+  };
+  lesson: {
+    findUnique: jest.MockedFunction<(args: unknown) => Promise<LessonLookupResult>>;
+    count: jest.MockedFunction<(args: unknown) => Promise<number>>;
+  };
+  lessonProgress: {
+    upsert: jest.MockedFunction<(args: unknown) => Promise<LessonProgressWriteResult>>;
+    count: jest.MockedFunction<(args: unknown) => Promise<number>>;
+  };
+  quiz: {
+    count: jest.MockedFunction<(args: unknown) => Promise<number>>;
+  };
+  quizAttempt: {
+    findMany: jest.MockedFunction<(args: unknown) => Promise<QuizAttemptLookupResult>>;
+  };
+  $transaction: jest.MockedFunction<(args: Array<Promise<number>>) => Promise<[number, number]>>;
 };
+
 const db = prisma as unknown as MockedPrisma;
 
 // ---------------------------------------------------------------------------
@@ -99,7 +127,12 @@ describe('EnrollmentService.markLessonComplete', () => {
   it('(c) upserts progress and returns updated percentage', async () => {
     db.lesson.findUnique.mockResolvedValue({ id: 'l1', module: { courseId: 'c1' } });
     db.enrollment.findUnique.mockResolvedValue({ id: 'e1' });
-    db.lessonProgress.upsert.mockResolvedValue({});
+    db.lessonProgress.upsert.mockResolvedValue({
+      id: 'lp1',
+      userId: 'u1',
+      completedAt: new Date(),
+      lessonId: 'l1',
+    });
     db.lesson.count.mockResolvedValue(4);
     db.lessonProgress.count.mockResolvedValue(2);
     const result = await svc.markLessonComplete('u1', 'l1');
@@ -181,7 +214,13 @@ describe('EnrollmentService.getCompletionStatus', () => {
     db.lesson.count.mockResolvedValue(2);
     db.lessonProgress.count.mockResolvedValue(2);
     db.quiz.count.mockResolvedValue(0);
-    db.enrollment.update.mockResolvedValue({});
+    db.enrollment.update.mockResolvedValue({
+      id: 'e1',
+      userId: 'u1',
+      courseId: 'c1',
+      enrolledAt: new Date(),
+      certificateCode: 'generated-cert-code',
+    });
     const s = await svc.getCompletionStatus('u1', 'e1');
     expect(s.eligible).toBe(true);
     expect(s.certificateCode).toMatch(

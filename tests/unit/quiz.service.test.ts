@@ -15,8 +15,13 @@ jest.mock('../../src/prisma', () => ({
 }));
 
 type MockedPrisma = {
-  quiz: { findUnique: jest.Mock };
-  quizAttempt: { findMany: jest.Mock; create: jest.Mock };
+  quiz: {
+    findUnique: jest.MockedFunction<(args: { where: { id: string }; include?: unknown }) => Promise<FakeQuiz | null>>;
+  };
+  quizAttempt: {
+    findMany: jest.MockedFunction<(args: { where: { userId: string; quizId: string }; select?: unknown }) => Promise<Array<{ status: 'PASSED' | 'FAILED' }>>>;
+    create: jest.MockedFunction<(args: { data: { userId: string; quizId: string; score: number; status: 'PASSED' | 'FAILED'; correctCount: number; totalCount: number } }) => Promise<{ id: string }>>;
+  };
 };
 
 const mockedPrisma = prisma as unknown as MockedPrisma;
@@ -89,7 +94,7 @@ describe('QuizService.submitAttempt', () => {
     const quiz = buildFiveQuestionQuiz({ passScore: 60 });
     mockedPrisma.quiz.findUnique.mockResolvedValue(quiz);
     mockedPrisma.quizAttempt.findMany.mockResolvedValue([]);
-    mockedPrisma.quizAttempt.create.mockResolvedValue({});
+    mockedPrisma.quizAttempt.create.mockResolvedValue({ id: 'attempt-1' });
 
     // 4 of 5 correct = 80% >= 60% pass score
     const result = await service.submitAttempt('user-1', quiz.id, answersForQuiz(quiz, 4));
@@ -143,7 +148,7 @@ describe('QuizService.submitAttempt', () => {
     const quiz = buildFiveQuestionQuiz({ passScore: 70 });
     mockedPrisma.quiz.findUnique.mockResolvedValue(quiz);
     mockedPrisma.quizAttempt.findMany.mockResolvedValue([]);
-    mockedPrisma.quizAttempt.create.mockResolvedValue({});
+    mockedPrisma.quizAttempt.create.mockResolvedValue({ id: 'attempt-1' });
 
     const result = await service.submitAttempt('user-1', quiz.id, answersForQuiz(quiz, 3));
 

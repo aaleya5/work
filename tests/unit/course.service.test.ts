@@ -10,6 +10,7 @@ import { CourseService } from '../../src/services/course.service';
 import prisma from '../../src/prisma';
 import { NotFoundError, UnprocessableEntityError } from '../../src/errors/app-error';
 import { Prisma } from '@prisma/client';
+import { beforeEach, describe, expect, it, jest } from '@jest/globals';
 
 jest.mock('../../src/prisma', () => ({
   __esModule: true,
@@ -21,9 +22,40 @@ jest.mock('../../src/prisma', () => ({
 }));
 
 type MockedPrisma = {
-  course: { findUnique: jest.Mock; create: jest.Mock; update: jest.Mock; delete: jest.Mock };
-  courseModule: { count: jest.Mock };
-  $transaction: jest.Mock;
+  course: {
+    findUnique: jest.MockedFunction<(args: { where: { id?: string; slug?: string }; select: unknown }) => Promise<{ id: string; published?: boolean } | null>>;
+    create: jest.MockedFunction<(args: unknown) => Promise<CourseRecordLike>>;
+    update: jest.MockedFunction<(args: unknown) => Promise<CourseRecordLike>>;
+    delete: jest.MockedFunction<(args: unknown) => Promise<void>>;
+  };
+  courseModule: {
+    count: jest.MockedFunction<(args: { where: { courseId: string; lessons: { some: Record<string, never> } } }) => Promise<number>>;
+  };
+  $transaction: jest.MockedFunction<(fn: (tx: any) => Promise<any>) => Promise<any>>;
+};
+
+type CourseRecordLike = {
+  id: string;
+  title: string;
+  slug: string;
+  category: 'PROGRAMMING';
+  difficulty: 'BEGINNER';
+  price: Prisma.Decimal;
+  published: boolean;
+  instructorId: string;
+  createdAt: Date;
+  updatedAt: Date;
+  modules: Array<{
+    id: string;
+    title: string;
+    moduleOrder: number;
+    lessons: Array<{
+      id: string;
+      title: string;
+      videoUrl: string | null;
+      lessonOrder: number;
+    }>;
+  }>;
 };
 const db = prisma as unknown as MockedPrisma;
 
@@ -35,7 +67,7 @@ const DTO = {
   modules: [{ title: 'M1', lessons: [{ title: 'L1', content: 'C1' }] }],
 };
 
-function record(overrides: object = {}) {
+function record(overrides: Partial<CourseRecordLike> = {}): CourseRecordLike {
   return {
     id: 'c1', title: DTO.title, slug: 'intro-to-typescript',
     category: 'PROGRAMMING', difficulty: 'BEGINNER',
@@ -58,8 +90,8 @@ describe('CourseService.create', () => {
 
   it('(a) runs inside a $transaction and returns CourseDto with numeric price', async () => {
     db.course.findUnique.mockResolvedValue(null);
-    db.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) =>
-      fn({ course: { create: jest.fn().mockResolvedValue(record()) } }),
+    db.$transaction.mockImplementation((fn) =>
+      fn({ course: { create: jest.fn(async () => record()) } }),
     );
     const result = await svc.create(DTO, 'i1');
     expect(result.id).toBe('c1');
@@ -69,8 +101,8 @@ describe('CourseService.create', () => {
 
   it('(b) generates a slug from the title', async () => {
     db.course.findUnique.mockResolvedValue(null);
-    db.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) =>
-      fn({ course: { create: jest.fn().mockResolvedValue(record()) } }),
+    db.$transaction.mockImplementation((fn) =>
+      fn({ course: { create: jest.fn(async () => record()) } }),
     );
     const result = await svc.create(DTO, 'i1');
     expect(result.slug).toBe('intro-to-typescript');
@@ -80,8 +112,8 @@ describe('CourseService.create', () => {
     db.course.findUnique
       .mockResolvedValueOnce({ id: 'other' }) // base slug taken
       .mockResolvedValueOnce(null);            // -1 suffix is free
-    db.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) =>
-      fn({ course: { create: jest.fn().mockResolvedValue(record({ slug: 'intro-to-typescript-1' })) } }),
+    db.$transaction.mockImplementation((fn) =>
+      fn({ course: { create: jest.fn(async () => record({ slug: 'intro-to-typescript-1' })) } }),
     );
     const result = await svc.create(DTO, 'i1');
     expect(result.slug).toBe('intro-to-typescript-1');
@@ -92,8 +124,8 @@ describe('CourseService.create', () => {
       .mockResolvedValueOnce({ id: 'a' }) // base taken
       .mockResolvedValueOnce({ id: 'b' }) // -1 taken
       .mockResolvedValueOnce(null);        // -2 free
-    db.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) =>
-      fn({ course: { create: jest.fn().mockResolvedValue(record({ slug: 'intro-to-typescript-2' })) } }),
+    db.$transaction.mockImplementation((fn) =>
+      fn({ course: { create: jest.fn(async () => record({ slug: 'intro-to-typescript-2' })) } }),
     );
     const result = await svc.create(DTO, 'i1');
     expect(result.slug).toBe('intro-to-typescript-2');
@@ -153,7 +185,7 @@ describe('CourseService.delete', () => {
   beforeEach(() => { svc = new CourseService(); jest.clearAllMocks(); });
 
   it('(a) resolves without error on success', async () => {
-    db.course.delete.mockResolvedValue({});
+    db.course.delete.mockResolvedValue(undefined);
     await expect(svc.delete('c1')).resolves.toBeUndefined();
   });
 
@@ -185,7 +217,7 @@ describe('CourseService.publishCourse', () => {
   it('(c) calls course.update with published:true when validation passes', async () => {
     db.course.findUnique.mockResolvedValue({ id: 'c1', published: false });
     db.courseModule.count.mockResolvedValue(1);
-    db.course.update.mockResolvedValue({});
+    db.course.update.mockResolvedValue(record());
     await svc.publishCourse('c1');
     expect(db.course.update).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'c1' }, data: { published: true } }),
@@ -195,7 +227,7 @@ describe('CourseService.publishCourse', () => {
   it('(d) uses courseModule.count with lessons:{ some:{} } filter — not a raw count', async () => {
     db.course.findUnique.mockResolvedValue({ id: 'c1', published: false });
     db.courseModule.count.mockResolvedValue(1);
-    db.course.update.mockResolvedValue({});
+    db.course.update.mockResolvedValue(record());
     await svc.publishCourse('c1');
     expect(db.courseModule.count).toHaveBeenCalledWith(
       expect.objectContaining({ where: expect.objectContaining({ lessons: { some: {} } }) }),

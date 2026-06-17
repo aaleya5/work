@@ -37,9 +37,19 @@ import { Prisma } from '@prisma/client';
 import { buildApp } from '../../src/app';
 
 type MockedPrisma = {
-  user: { create: jest.Mock; findUnique: jest.Mock };
-  course: { findUnique: jest.Mock; create: jest.Mock; update: jest.Mock; delete: jest.Mock };
-  courseModule: { count: jest.Mock };
+  user: {
+    create: jest.MockedFunction<(args: unknown) => Promise<unknown>>;
+    findUnique: jest.MockedFunction<(args: unknown) => Promise<unknown>>;
+  };
+  course: {
+    findUnique: jest.MockedFunction<(args: unknown) => Promise<unknown>>;
+    create: jest.MockedFunction<(args: unknown) => Promise<unknown>>;
+    update: jest.MockedFunction<(args: unknown) => Promise<unknown>>;
+    delete: jest.MockedFunction<(args: unknown) => Promise<unknown>>;
+  };
+  courseModule: {
+    count: jest.MockedFunction<(args: unknown) => Promise<number>>;
+  };
 };
 
 const db = prisma as unknown as MockedPrisma;

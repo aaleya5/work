@@ -11,6 +11,7 @@ import { AuthService } from '../../src/services/auth.service';
 import prisma from '../../src/prisma';
 import { ConflictError, UnauthorizedError } from '../../src/errors/app-error';
 import { Prisma } from '@prisma/client';
+import { beforeEach, describe, expect, it, jest } from '@jest/globals';
 
 jest.mock('../../src/prisma', () => ({
   __esModule: true,
@@ -19,8 +20,14 @@ jest.mock('../../src/prisma', () => ({
   },
 }));
 
+type UserCreateResult = { id: string; email: string; name: string; role: string };
+type UserLookupResult = { id: string; email: string; name: string; role: string; password: string } | null;
+
 type MockedPrisma = {
-  user: { create: jest.Mock; findUnique: jest.Mock };
+  user: {
+    create: jest.MockedFunction<(args: unknown) => Promise<UserCreateResult>>;
+    findUnique: jest.MockedFunction<(args: unknown) => Promise<UserLookupResult>>;
+  };
 };
 
 const db = prisma as unknown as MockedPrisma;
@@ -51,8 +58,8 @@ describe('AuthService.register', () => {
 
   it('(b) stores a hashed password — different from the plain-text input', async () => {
     let captured = '';
-    db.user.create.mockImplementation((args: { data: { password: string } }) => {
-      captured = args.data.password;
+    db.user.create.mockImplementation((args: unknown) => {
+      captured = (args as { data: { password: string } }).data.password;
       return Promise.resolve({ id: 'u1', email: BASE_DTO.email, name: BASE_DTO.name, role: 'STUDENT' });
     });
     await service.register(BASE_DTO);
@@ -118,8 +125,8 @@ describe('AuthService.validateCredentials', () => {
   it('(d) returns the authenticated principal on valid credentials', async () => {
     // Register a real hash first, then validate against it
     let storedHash = '';
-    db.user.create.mockImplementation((args: { data: { password: string } }) => {
-      storedHash = args.data.password;
+    db.user.create.mockImplementation((args: unknown) => {
+      storedHash = (args as { data: { password: string } }).data.password;
       return Promise.resolve({ id: 'u1', email: BASE_DTO.email, name: BASE_DTO.name, role: 'STUDENT' });
     });
     await new AuthService().register(BASE_DTO);

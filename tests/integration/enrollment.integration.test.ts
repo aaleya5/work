@@ -1,7 +1,7 @@
 import { execSync } from 'node:child_process';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import type { FastifyInstance } from 'fastify';
-import type { Role } from '@prisma/client';
+import { type Role, PrismaClient } from '@prisma/client';
 
 /**
  * End-to-end style integration test:
@@ -19,8 +19,7 @@ describe('Enrollment completion (integration)', () => {
 
   let container: StartedPostgreSqlContainer;
   let app: FastifyInstance;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let prisma: any;
+  let prisma: PrismaClient;
   let studentToken: string;
   let enrollmentId: string;
 
