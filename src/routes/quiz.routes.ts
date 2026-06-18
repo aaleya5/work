@@ -26,7 +26,15 @@ export default async function quizRoutes(fastify: FastifyInstance): Promise<void
 
   fastify.post(
     '/api/quizzes/:id/attempts',
-    { onRequest: [fastify.authorize('STUDENT')] },
+    {
+      onRequest: [fastify.authorize('STUDENT')],
+      config: {
+        rateLimit: {
+          max: 5,
+          timeWindow: '1 minute',
+        },
+      },
+    },
     async (request, reply): Promise<void> => {
       const { id } = IdParamSchema.parse(request.params);
       const dto = SubmitAttemptSchema.parse(request.body);
